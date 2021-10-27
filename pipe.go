@@ -6,6 +6,16 @@ import (
 	"sync"
 )
 
+// Pipe creates a synchronous in-memory, context-aware pipe. It is modeled after io.Pipe.
+func Pipe() (*PipeReader, *PipeWriter) {
+	p := &pipe{
+		wrCh: make(chan []byte),
+		rdCh: make(chan int),
+		done: make(chan struct{}),
+	}
+	return &PipeReader{p}, &PipeWriter{p}
+}
+
 // onceError is an object that will only store an error once.
 type onceError struct {
 	sync.Mutex // guards following

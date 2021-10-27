@@ -3,7 +3,7 @@ package contextaware
 import (
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -51,97 +51,18 @@ func supportsSetWriteDeadline(obj interface{}) (withSetWriteDeadline, bool) {
 	return wswd, !errors.Is(err, os.ErrNoDeadline)
 }
 
-// A Reader is an io.Reader that also supports cancellation via a context.Context.
-type Reader interface {
-	ReadContext(ctx context.Context, p []byte) (n int, err error)
-}
-
-type simpleReader struct {
-	io.Reader
-}
-
-func (r simpleReader) ReadContext(ctx context.Context, p []byte) (n int, err error) {
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	default:
-	}
-	return r.Read(p)
-}
-
-type readerWithSetDeadline struct {
-	r           io.Reader
-	setDeadline func(time.Time) error
-}
-
-func (r readerWithSetDeadline) ReadContext(ctx context.Context, p []byte) (n int, err error) {
-	return withCancelViaDeadline(ctx, r.setDeadline, func() (int, error) {
-		return r.r.Read(p)
-	})
-}
-
-// NewReader creates a new contextaware.Reader from an existing io.Reader.
-func NewReader(r io.Reader) Reader {
-	if cr, ok := r.(Reader); ok {
-		return cr
-	}
-	if obj, ok := supportsSetReadDeadline(r); ok {
-		return readerWithSetDeadline{r: r, setDeadline: obj.SetReadDeadline}
-	}
-	if obj, ok := supportsSetDeadline(r); ok {
-		return readerWithSetDeadline{r: r, setDeadline: obj.SetDeadline}
-	}
-	return simpleReader{r}
-}
-
-// A Writer is an io.Writer that also supports cancellation via a context.Context.
-type Writer interface {
-	WriteContext(ctx context.Context, p []byte) (n int, err error)
-}
-
-type simpleWriter struct {
-	w io.Writer
-}
-
-func (w simpleWriter) WriteContext(ctx context.Context, p []byte) (n int, err error) {
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	default:
-	}
-	return w.w.Write(p)
-}
-
-type writerWithSetDeadline struct {
-	w           io.Writer
-	setDeadline func(time.Time) error
-}
-
-func (w writerWithSetDeadline) WriteContext(ctx context.Context, p []byte) (n int, err error) {
-	return withCancelViaDeadline(ctx, w.setDeadline, func() (int, error) {
-		return w.w.Write(p)
-	})
-}
-
-// NewWriter creates a new contextaware.Writer from an existing io.Writer.
-func NewWriter(w io.Writer) Writer {
-	if cw, ok := w.(Writer); ok {
-		return cw
-	}
-	if obj, ok := supportsSetWriteDeadline(w); ok {
-		return writerWithSetDeadline{w: w, setDeadline: obj.SetWriteDeadline}
-	}
-	if obj, ok := supportsSetDeadline(w); ok {
-		return writerWithSetDeadline{w: w, setDeadline: obj.SetDeadline}
-	}
-	return simpleWriter{w}
-}
-
 func withCancelViaDeadline(
 	ctx context.Context,
 	setDeadline func(time.Time) error,
 	operation func() (n int, err error),
 ) (n int, err error) {
+	// fail early
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
 	var cancelOnce sync.Once
 
 	// set the deadline from the context's deadline
@@ -190,5 +111,14 @@ func withCancelViaDeadline(
 	// this function returns.
 	cancelOnce.Do(func() {})
 
-	return n, err
+	switch {
+	case err == nil:
+		return n, nil
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return n, fmt.Errorf("%w: %v", context.DeadlineExceeded, err)
+	case errors.Is(ctx.Err(), context.Canceled):
+		return n, fmt.Errorf("%w: %v", context.Canceled, err)
+	default:
+		return n, err
+	}
 }
